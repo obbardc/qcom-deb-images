@@ -113,6 +113,11 @@ jobs:
             apt -y install git crossbuild-essential-arm64 make flex bison bc \
                 libdw-dev libelf-dev libssl-dev libssl-dev:arm64 dpkg-dev \
                 debhelper kmod python3 rsync coreutils
+            # extra dependencies for building from the Debian salsa repo
+            # (--debian); harmless for other builds
+            case "${BUILD_LINUX_DEB_EXTRA_ARGS}" in
+                *--debian*) apt -y install devscripts quilt ;;
+            esac
             scripts/build-linux-deb.py ${BUILD_LINUX_DEB_EXTRA_ARGS} \
                 `ls kernel-configs/*.config | sort` \
 
