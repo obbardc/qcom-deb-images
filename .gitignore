@@ -8,3 +8,4 @@ dtb-combineddtb.bin
 *.changes
 rootfs.tar*
 fake-scratch.img.*
+__pycache__/
