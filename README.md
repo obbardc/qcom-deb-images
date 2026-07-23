@@ -77,6 +77,21 @@ scripts/build-linux-deb.py kernel-configs/*.config
 scripts/build-linux-deb.py --linux-next kernel-configs/*.config
 ```
 
+You can also build from the [Debian kernel-team packaging repository](https://salsa.debian.org/kernel-team/linux),
+which generates the config and applies the Debian patch series using Debian's
+own scripts. This requires a few extra build-dependencies:
+
+```bash
+apt -y install devscripts quilt
+
+# build the default branch (debian/latest) with recommended config fragments:
+scripts/build-linux-deb.py --debian kernel-configs/*.config
+
+# or a specific branch, with an extra custom patch on top of the Debian series:
+scripts/build-linux-deb.py --debian --ref debian/latest \
+    --kernel-patch my-fix.patch kernel-configs/*.config
+```
+
 ### Build the image
 
 Building the image requires the following build-dependencies:
