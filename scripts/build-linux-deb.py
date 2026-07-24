@@ -49,6 +49,7 @@ GIT_UPSTREAM = {
         "ref": "qcom-next",
         "ref_prefix": "qcom-next-",
     },
+    # TODO: with `debian/7.0/trixie-backports` we generate `linux-image-7.0.13 (7.0.13-1)` while upstream is `linux-image-7.0.13+deb13-arm64 (7.0.13-1~bpo13+1)`?
     "debian": {
         # the Debian kernel-team packaging repo (debian/ only, no source)
         "repo": "https://salsa.debian.org/kernel-team/linux",
