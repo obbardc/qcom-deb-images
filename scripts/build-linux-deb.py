@@ -2,7 +2,30 @@
 # Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Build an arm64 Debian kernel package (.deb).
+
+The script cross-builds a Linux kernel .deb for arm64 from one of two kinds
+of source tree:
+
+* a "mainline-style" git tree (torvalds/linux, linux-next, qcom-next or an
+  arbitrary --repo/--ref): the tree is cloned, seeded with ``make defconfig``
+  and built with ``make bindeb-pkg``.
+
+* the Debian kernel-team packaging repository (--debian,
+  https://salsa.debian.org/kernel-team/linux): only the ``debian/`` packaging
+  lives in that repo, so the matching upstream source is fetched with Debian's
+  own tooling (uscan), the Debian patch series is applied and the config is
+  generated with the Debian scripts. The resulting patched tree and config are
+  then built with the same ``bindeb-pkg`` path.
+
+In both cases, custom ``.config`` fragments (positional arguments) are merged
+on top of the base config with ``scripts/kconfig/merge_config.sh``, and custom
+kernel patches (--kernel-patch) can be layered on top of the tree.
+"""
+
 import argparse
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +48,23 @@ GIT_UPSTREAM = {
         "ref": "qcom-next",
         "ref_prefix": "qcom-next-",
     },
+    "debian": {
+        # the Debian kernel-team packaging repo (debian/ only, no source)
+        "repo": "https://salsa.debian.org/kernel-team/linux",
+        "ref": "debian/latest",
+        "ref_prefix": None,
+    },
 }
+
+# arch/featureset/flavour to build for the Debian kernel; the default arm64
+# flavour is "arm64" with the "none" featureset (see debian/config/arm64/
+# defines.toml)
+DEBIAN_ARCH = "arm64"
+DEBIAN_FEATURESET = "none"
+DEBIAN_FLAVOUR = "arm64"
+# identifies the per-flavour build the Debian scripts produce, e.g. the setup
+# target "setup_arm64_none_arm64" and the build dir "build_arm64_none_arm64"
+DEBIAN_BUILD_ID = f"{DEBIAN_ARCH}_{DEBIAN_FEATURESET}_{DEBIAN_FLAVOUR}"
 
 # base config to use
 BASE_CONFIG = "defconfig"
@@ -116,7 +155,7 @@ def check_package_installed(pkg):
     return False
 
 
-def check_dependencies():
+def check_dependencies(debian_mode=False):
     packages = [
         # needed to clone repository
         "git",
@@ -142,6 +181,14 @@ def check_dependencies():
         "coreutils",
     ]
 
+    if debian_mode:
+        packages += [
+            # provides uscan, used to fetch the upstream source
+            "devscripts",
+            # the Debian kernel packaging applies its patches with quilt
+            "quilt",
+        ]
+
     log_i(f"Checking build-dependencies ({' '.join(packages)})")
 
     missing = []
@@ -152,6 +199,152 @@ def check_dependencies():
 
     if missing:
         fatal(f"Missing build-dependencies: {' '.join(missing)}")
+
+
+def apply_series_patches(clone_dir, kernel_patches):
+    """
+    Copy custom patches into the Debian quilt series so they are applied
+    after the salsa patches when the source tree is generated.
+    """
+    if not kernel_patches:
+        return
+
+    patches_dir = clone_dir / "debian" / "patches"
+    series_file = patches_dir / "series"
+    names = []
+    for patch in kernel_patches:
+        patch = Path(patch)
+        if not patch.exists():
+            fatal(f"Kernel patch '{patch}' does not exist")
+        dest = patches_dir / patch.name
+        log_i(f"Adding custom patch {patch} to Debian series")
+        shutil.copyfile(patch, dest)
+        names.append(patch.name)
+
+    # append to the series so they apply last (on top of the salsa patches)
+    with open(series_file, "a", encoding="utf-8") as f:
+        f.write("\n# custom patches added by build-linux-deb.py\n")
+        for name in names:
+            f.write(f"{name}\n")
+
+
+def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
+    """
+    Clone the Debian kernel-team packaging repo, fetch the upstream source
+    with the Debian scripts, apply the salsa (and any custom) patches and
+    generate the arm64 config.
+
+    Returns a tuple of (linux_dir, base_config) where linux_dir is the
+    patched source tree and base_config is the Debian-generated .config.
+    """
+    log_i(f"Cloning Debian kernel ({repo}:{ref}) into {clone_dir}")
+    subprocess.run(
+        ["git", "clone", "--depth=1", "--branch", ref, repo, str(clone_dir)],
+        check=True,
+    )
+
+    # the salsa repo ships only the debian/ packaging; fetch the matching
+    # upstream source using Debian's own tooling (handles RC versions and
+    # DFSG file exclusion). This produces ../linux_<version>.orig.tar.* .
+    log_i("Fetching upstream source with uscan")
+    subprocess.run(
+        [
+            "uscan",
+            "--download-current-version",
+            "--vcs-export-uncompressed",
+        ],
+        check=True,
+        cwd=clone_dir,
+    )
+
+    origs = sorted(clone_dir.parent.glob("linux_*.orig.tar.*"))
+    if not origs:
+        fatal("uscan did not produce an upstream orig tarball")
+    orig = origs[-1]
+
+    # populate the working tree with the upstream source (the tarball has a
+    # single linux-<version>/ top-level directory which we strip)
+    log_i(f"Unpacking upstream source {orig.name} into {clone_dir}")
+    subprocess.run(
+        ["tar", "xf", str(orig), "--strip-components=1", "-C", str(clone_dir)],
+        check=True,
+    )
+
+    apply_series_patches(clone_dir, kernel_patches)
+
+    # generate debian/control and debian/rules.gen with the Debian scripts.
+    # This must happen before dpkg-source (which reads debian/control) and
+    # works on the unpatched tree.
+    # NB: the "debian/control" target regenerates debian/control and then
+    # exits non-zero *on purpose* (to force a re-run in the maintainer
+    # workflow); tolerate that and verify the file was produced instead.
+    log_i("Generating Debian control")
+    subprocess.run(
+        ["make", "-f", "debian/rules", "debian/control"],
+        check=False,
+        cwd=clone_dir,
+    )
+    if not (clone_dir / "debian" / "control").is_file():
+        fatal("Debian scripts did not generate debian/control")
+
+    # the source is packaged in "3.0 (quilt)" format, so apply the full patch
+    # series (salsa + any custom patches) to the working tree the same way
+    # dpkg-source would when unpacking a source package
+    log_i("Applying the Debian patch series (dpkg-source --before-build)")
+    subprocess.run(
+        ["dpkg-source", "--before-build", "."],
+        check=True,
+        cwd=clone_dir,
+    )
+
+    # generate the flat arm64 .config using the Debian scripts. rules.gen does
+    # not set the host arch (the top-level rules does), so export it here to
+    # allow the arm64 target to build on a non-arm64 host.
+    log_i(f"Generating Debian config (setup_{DEBIAN_BUILD_ID})")
+    subprocess.run(
+        ["make", "-f", "debian/rules.gen", f"setup_{DEBIAN_BUILD_ID}"],
+        check=True,
+        cwd=clone_dir,
+        env={"DEB_HOST_ARCH": DEBIAN_ARCH, **subprocess.os.environ},
+    )
+    gen_config = (clone_dir / "debian" / "build"
+                  / f"build_{DEBIAN_BUILD_ID}" / ".config")
+    if not gen_config.is_file():
+        fatal(f"Expected Debian-generated config at {gen_config}")
+
+    # Debian's config references module-signing and trusted keys that only
+    # exist inside Debian's own packaging build (e.g. CONFIG_MODULE_SIG_KEY=
+    # "output/signing_key.pem"). Debian itself strips these from its
+    # distributed config; do the same so a standalone bindeb-pkg build signs
+    # modules with a freshly generated ephemeral key rather than requiring
+    # external key files. olddefconfig later restores buildable defaults.
+    base_config = clone_dir.parent / f"{clone_dir.name}-arm64.config"
+    strip_re = re.compile(
+        r"^CONFIG_(MODULE_SIG_(ALL|KEY)|SYSTEM_TRUSTED_KEYS"
+        r"|SYSTEM_REVOCATION_KEYS|BUILD_SALT)[ =]"
+    )
+    with open(gen_config, encoding="utf-8") as f_in, \
+            open(base_config, "w", encoding="utf-8") as f_out:
+        for line in f_in:
+            if not strip_re.match(line):
+                f_out.write(line)
+
+    # assemble a clean patched source tree to build in-tree with bindeb-pkg.
+    # The Debian build trees carry the debian/ packaging (and hardlink it back
+    # into debian/build), so build from a copy that excludes it instead of
+    # trying to prune those trees in place.
+    linux_dir = clone_dir.parent / f"{clone_dir.name}-src"
+    log_i(f"Copying patched source tree to {linux_dir}")
+    subprocess.run(
+        [
+            "rsync", "-a", "--delete",
+            "--exclude=/debian", "--exclude=/.pc", "--exclude=/.git",
+            f"{clone_dir}/", f"{linux_dir}/",
+        ],
+        check=True,
+    )
+
+    return linux_dir, base_config
 
 
 def main():
@@ -180,6 +373,23 @@ def main():
         help="Use qcom-next repository and ref defaults",
     )
     parser.add_argument(
+        "--debian",
+        action="store_true",
+        help=("Build from the Debian kernel-team salsa repository, using its "
+              "scripts to generate the config and apply its patch series. "
+              "Use --ref to select the branch (default: "
+              f"{GIT_UPSTREAM['debian']['ref']})"),
+    )
+    parser.add_argument(
+        "--kernel-patch",
+        action="append",
+        default=[],
+        metavar="PATCH",
+        help=("Custom kernel patch file to apply on top of the tree "
+              "(repeatable). In Debian mode these are appended to the salsa "
+              "quilt series"),
+    )
+    parser.add_argument(
         "--local-dir",
         type=str,
         default=None,
@@ -206,6 +416,8 @@ def main():
         git_upstream_key = "linux-next"
     elif args.qcom_next:
         git_upstream_key = "qcom-next"
+    elif args.debian:
+        git_upstream_key = "debian"
 
     ref_prefix = GIT_UPSTREAM["linux"]["ref_prefix"]
     if git_upstream_key is not None:
@@ -223,9 +435,23 @@ def main():
         else:
             log_i("No suitable tag found, falling back to default ref")
 
-    check_dependencies()
+    debian_mode = args.debian
+    check_dependencies(debian_mode=debian_mode)
 
-    if args.local_dir:
+    # base .config to seed the build with; in Debian mode this comes from the
+    # Debian scripts, otherwise we generate it below with BASE_CONFIG
+    base_config = None
+
+    if debian_mode:
+        if args.local_dir:
+            fatal("--local-dir is not supported in Debian mode")
+        linux_dir, base_config = prepare_debian_source(
+            Path("linux-debian").resolve(),
+            args.repo,
+            args.ref,
+            args.kernel_patch,
+        )
+    elif args.local_dir:
         linux_dir = Path(args.local_dir)
         if not linux_dir.exists():
             fatal(f"Provided --local-dir '{linux_dir}' does not exist")
@@ -246,7 +472,23 @@ def main():
             check=True,
         )
 
-    log_i(f"Configuring Linux (base config: {BASE_CONFIG})")
+    # apply custom patches directly to a plain (non-Debian) tree; in Debian
+    # mode they were already added to the quilt series
+    if args.kernel_patch and not debian_mode:
+        for patch in args.kernel_patch:
+            patch = Path(patch)
+            if not patch.exists():
+                fatal(f"Kernel patch '{patch}' does not exist")
+            log_i(f"Applying custom patch {patch}")
+            with open(patch, "rb") as f:
+                subprocess.run(
+                    ["git", "apply", "-p1", "-"],
+                    check=True,
+                    cwd=linux_dir,
+                    stdin=f,
+                )
+
+    log_i("Configuring Linux")
     # directory to store local config fragments so they can be picked up by
     # kbuild
     local_conf_dir = linux_dir / "kernel" / "configs"
@@ -285,9 +527,15 @@ def main():
         "DEB_HOST_ARCH=arm64",
     ]
 
-    # Create base defconfig first
-    subprocess.run(make_base_command + [BASE_CONFIG], check=True,
-                   cwd=linux_dir)
+    if base_config is not None:
+        # seed with the Debian-generated config
+        log_i(f"Using Debian-generated base config: {base_config}")
+        shutil.copyfile(base_config, linux_dir / ".config")
+    else:
+        # Create base defconfig first
+        log_i(f"Creating base config: {BASE_CONFIG}")
+        subprocess.run(make_base_command + [BASE_CONFIG], check=True,
+                       cwd=linux_dir)
 
     # Merge config fragments using merge_config.sh for proper dependency
     # handling
@@ -299,7 +547,7 @@ def main():
         subprocess.run(
             merge_command,
             check=True,
-            cwd="linux",
+            cwd=linux_dir,
             env={"ARCH": "arm64", **subprocess.os.environ}
         )
 
@@ -307,7 +555,7 @@ def main():
         subprocess.run(
             make_base_command + ["olddefconfig"],
             check=True,
-            cwd="linux"
+            cwd=linux_dir
         )
 
     log_i("Building Linux deb")
