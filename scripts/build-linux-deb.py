@@ -187,6 +187,13 @@ def check_dependencies(debian_mode=False):
             "devscripts",
             # the Debian kernel packaging applies its patches with quilt
             "quilt",
+            # TODO: something something
+            # These packages are required when building directly from the Salsa checkout.
+            # The generated source files included in upstream release tarballs are not
+            # present in the Git repository, so the build must regenerate them using
+            # dacite and Jinja2.
+            "python3-dacite",
+            "python3-jinja2",
         ]
 
     log_i(f"Checking build-dependencies ({' '.join(packages)})")
