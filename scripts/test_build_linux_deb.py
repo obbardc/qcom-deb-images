@@ -144,3 +144,34 @@ def test_check_dependencies_skips_debian_packages_by_default(monkeypatch):
     bld.check_dependencies(debian_mode=False)
     assert "devscripts" not in seen
     assert "quilt" not in seen
+
+
+# --- check_debian_compiler ------------------------------------------------
+
+def _make_defines(clone_dir, c_compiler="gcc-14"):
+    config_dir = clone_dir / "debian" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "defines.toml").write_text(
+        f"[build]\nc_compiler = '{c_compiler}'\n"
+    )
+
+
+def test_check_debian_compiler_accepts_installed_cross_compiler(
+        tmp_path, monkeypatch):
+    _make_defines(tmp_path)
+    seen = []
+    monkeypatch.setattr(bld.shutil, "which",
+                        lambda cc: seen.append(cc) or "/usr/bin/" + cc)
+
+    bld.check_debian_compiler(tmp_path)
+    # the versioned *cross* compiler is what the Debian rules invoke, not the
+    # native one
+    assert seen == [f"{bld.DEBIAN_GNU_TYPE}-gcc-14"]
+
+
+def test_check_debian_compiler_missing_is_fatal(tmp_path, monkeypatch):
+    _make_defines(tmp_path)
+    monkeypatch.setattr(bld.shutil, "which", lambda cc: None)
+
+    with pytest.raises(SystemExit):
+        bld.check_debian_compiler(tmp_path)
