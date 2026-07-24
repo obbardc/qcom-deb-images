@@ -65,6 +65,34 @@ def test_apply_series_patches_missing_patch_is_fatal(tmp_path):
         bld.apply_series_patches(tmp_path, [str(tmp_path / "nope.patch")])
 
 
+# --- upstream_version / find_orig_tarball ---------------------------------
+
+@pytest.mark.parametrize("version, expected", [
+    ("7.0.13-1~bpo13+1", "7.0.13"),
+    ("1:7.0.13-1~bpo13+1", "7.0.13"),
+    ("7.2~rc3-1~exp1", "7.2~rc3"),
+    ("6.12.48-1", "6.12.48"),
+])
+def test_upstream_version(version, expected):
+    assert bld.upstream_version(version) == expected
+
+
+def test_find_orig_tarball_ignores_other_versions(tmp_path):
+    # a leftover tarball from an earlier run of a different branch; sorting
+    # alone would pick this one as it is "greater" than 7.0.13
+    (tmp_path / "linux_7.2~rc3.orig.tar.xz").touch()
+    (tmp_path / "linux_7.0.13.orig.tar.xz").touch()
+
+    orig = bld.find_orig_tarball(tmp_path, "7.0.13")
+    assert orig.name == "linux_7.0.13.orig.tar.xz"
+
+
+def test_find_orig_tarball_missing_is_fatal(tmp_path):
+    (tmp_path / "linux_7.2~rc3.orig.tar.xz").touch()
+    with pytest.raises(SystemExit):
+        bld.find_orig_tarball(tmp_path, "7.0.13")
+
+
 # --- get_latest_dated_tag -------------------------------------------------
 
 def test_get_latest_dated_tag_picks_newest_matching_prefix(monkeypatch):
