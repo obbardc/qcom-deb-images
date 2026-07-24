@@ -269,10 +269,10 @@ def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
     """
     log_i(f"Cloning Debian kernel ({repo}:{ref}) into {clone_dir}")
     # TODO: can we allow previous runs?!
-    #subprocess.run(
-    #    ["git", "clone", "--depth=1", "--branch", ref, repo, str(clone_dir)],
-    #    check=True,
-    #)
+    subprocess.run(
+        ["git", "clone", "--depth=1", "--branch", ref, repo, str(clone_dir)],
+        check=True,
+    )
 
     # the salsa repo ships only the debian/ packaging; fetch the matching
     # upstream source using Debian's own tooling (handles RC versions and
