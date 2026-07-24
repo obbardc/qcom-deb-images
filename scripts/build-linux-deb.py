@@ -235,6 +235,29 @@ def apply_series_patches(clone_dir, kernel_patches):
             f.write(f"{name}\n")
 
 
+def upstream_version(version):
+    """
+    Strip the epoch and the Debian revision from a Debian version, e.g.
+    "1:7.0.13-1~bpo13+1" -> "7.0.13". This is dpkg's
+    DEB_VERSION_EPOCH_UPSTREAM, which names the orig tarball.
+    """
+    return version.split(":", 1)[-1].rsplit("-", 1)[0]
+
+
+def find_orig_tarball(parent_dir, version):
+    """
+    Locate the orig tarball matching the given upstream version, the same way
+    debian/rules' TAR_ORIG does. Globbing for any linux_*.orig.tar.* would
+    happily pick up a leftover tarball from an earlier run of a different
+    branch.
+    """
+    origs = sorted(parent_dir.glob(f"linux_{version}.orig.tar.*"))
+    if not origs:
+        fatal(f"No upstream orig tarball for version {version} in "
+              f"{parent_dir}")
+    return origs[0]
+
+
 def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
     """
     Clone the Debian kernel-team packaging repo, fetch the upstream source
@@ -265,10 +288,12 @@ def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
         cwd=clone_dir,
     )
 
-    origs = sorted(clone_dir.parent.glob("linux_*.orig.tar.*"))
-    if not origs:
-        fatal("uscan did not produce an upstream orig tarball")
-    orig = origs[-1]
+    version = upstream_version(subprocess.check_output(
+        ["dpkg-parsechangelog", "-S", "Version"],
+        cwd=clone_dir,
+        text=True,
+    ).strip())
+    orig = find_orig_tarball(clone_dir.parent, version)
 
     # populate the working tree with the upstream source (the tarball has a
     # single linux-<version>/ top-level directory which we strip)
@@ -295,14 +320,21 @@ def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
     if not (clone_dir / "debian" / "control").is_file():
         fatal("Debian scripts did not generate debian/control")
 
-    # the source is packaged in "3.0 (quilt)" format, so apply the full patch
-    # series (salsa + any custom patches) to the working tree the same way
-    # dpkg-source would when unpacking a source package
-    log_i("Applying the Debian patch series (dpkg-source --before-build)")
+    # apply the full patch series (salsa + any custom patches) with quilt, the
+    # way the "orig" target in debian/rules does. Note that "dpkg-source
+    # --before-build" cannot be used here: it dry-runs the first patch and
+    # silently does nothing (exit 0) if it does not apply, which later shows up
+    # as an obscure "test -d .pc" failure in debian/rules.real.
+    log_i("Applying the Debian patch series (quilt push -a)")
     subprocess.run(
-        ["dpkg-source", "--before-build", "."],
+        ["quilt", "push", "--quiltrc", "-", "-a", "-q", "--fuzz=0"],
         check=True,
         cwd=clone_dir,
+        env={
+            **subprocess.os.environ,
+            "QUILT_PATCHES": str(clone_dir / "debian" / "patches"),
+            "QUILT_PC": ".pc",
+        },
     )
 
     # generate the flat arm64 .config using the Debian scripts. rules.gen does
