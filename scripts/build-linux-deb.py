@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 # git repo/ref to use
@@ -60,6 +61,8 @@ GIT_UPSTREAM = {
 # flavour is "arm64" with the "none" featureset (see debian/config/arm64/
 # defines.toml)
 DEBIAN_ARCH = "arm64"
+# GNU type matching DEBIAN_ARCH, used to name the cross toolchain
+DEBIAN_GNU_TYPE = "aarch64-linux-gnu"
 DEBIAN_FEATURESET = "none"
 DEBIAN_FLAVOUR = "arm64"
 # identifies the per-flavour build the Debian scripts produce, e.g. the setup
@@ -235,6 +238,25 @@ def apply_series_patches(clone_dir, kernel_patches):
             f.write(f"{name}\n")
 
 
+def check_debian_compiler(clone_dir):
+    """
+    The Debian kernel packaging pins an exact compiler version per branch
+    (c_compiler in debian/config/defines.toml, e.g. "gcc-14") and invokes it as
+    <gnu-type>-<c_compiler>. That versioned cross compiler is not pulled in by
+    crossbuild-essential-arm64, which depends on the distribution's *default*
+    gcc, so check for it here and name the package to install.
+    """
+    defines = clone_dir / "debian" / "config" / "defines.toml"
+    with open(defines, "rb") as f:
+        c_compiler = tomllib.load(f).get("build", {}).get("c_compiler", "gcc")
+
+    cross_cc = f"{DEBIAN_GNU_TYPE}-{c_compiler}"
+    if shutil.which(cross_cc) is None:
+        fatal(f"Debian pins {c_compiler} for this branch but {cross_cc} was "
+              f"not found; install {c_compiler}-{DEBIAN_GNU_TYPE}")
+    log_i(f"Using the Debian-pinned compiler {cross_cc}")
+
+
 def upstream_version(version):
     """
     Strip the epoch and the Debian revision from a Debian version, e.g.
@@ -273,6 +295,10 @@ def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
         ["git", "clone", "--depth=1", "--branch", ref, repo, str(clone_dir)],
         check=True,
     )
+
+    # fail before the (slow) upstream download if the compiler this branch
+    # pins is not installed
+    check_debian_compiler(clone_dir)
 
     # the salsa repo ships only the debian/ packaging; fetch the matching
     # upstream source using Debian's own tooling (handles RC versions and
@@ -338,14 +364,20 @@ def prepare_debian_source(clone_dir, repo, ref, kernel_patches):
     )
 
     # generate the flat arm64 .config using the Debian scripts. rules.gen does
-    # not set the host arch (the top-level rules does), so export it here to
-    # allow the arm64 target to build on a non-arm64 host.
+    # not set the host arch (the top-level rules does), so run it under
+    # dpkg-architecture to build the arm64 target on a non-arm64 host. Setting
+    # DEB_HOST_ARCH alone is not enough: dpkg-architecture does not derive the
+    # other variables from it, so DEB_HOST_GNU_TYPE would stay at the build
+    # triplet and the Debian rules would cross-compile with, say,
+    # x86_64-linux-gnu-gcc-14.
     log_i(f"Generating Debian config (setup_{DEBIAN_BUILD_ID})")
     subprocess.run(
-        ["make", "-f", "debian/rules.gen", f"setup_{DEBIAN_BUILD_ID}"],
+        [
+            "dpkg-architecture", "-a", DEBIAN_ARCH, "-c",
+            "make", "-f", "debian/rules.gen", f"setup_{DEBIAN_BUILD_ID}",
+        ],
         check=True,
         cwd=clone_dir,
-        env={"DEB_HOST_ARCH": DEBIAN_ARCH, **subprocess.os.environ},
     )
     gen_config = (clone_dir / "debian" / "build"
                   / f"build_{DEBIAN_BUILD_ID}" / ".config")
