@@ -1,0 +1,164 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# HACK: quick capsule update test for the RB1 U-Boot; submit with submit.sh
+actions:
+- deploy:
+    rootfs_image: disk-emmc.img2
+    qcomflash:
+      headers:
+        QLIAuthorization: Q_QLI_S3_TOKEN
+      url: "{{BUILD_DOWNLOAD_URL}}{{ARTIFACT_PREFIX}}-flash-emmc.tar.gz"
+      apply-overlay: true
+    timeout:
+      minutes: 20
+    to: qdl
+- boot:
+    firehose_program: prog_firehose_ddr.elf
+    rawprogram: rawprogram0.xml
+    patch: patch0.xml
+    path: flash_qrb2210-rb1_emmc
+    storage: emmc
+    debug: true
+    timeout:
+      minutes: 15
+    method: qdl
+- command:
+    name: network_turn_on
+- boot:
+    auto_login:
+      login_prompt: 'login:'
+      username: debian
+      password_prompt: 'Password'
+      password: debian
+      login_commands:
+      - "debian"
+      - "new password"
+      - "new password"
+      - sudo su
+    method: minimal
+    prompts:
+    - root@debian
+    - debian@debian
+    - "Current password"
+    - "New password"
+    - "Retype new password"
+    timeout:
+      minutes: 3
+- test:
+    timeout:
+      minutes: 10
+    definitions:
+    - from: inline
+      name: capsule-install
+      path: inline/capsule-install.yaml
+      repository:
+        metadata:
+          format: Lava-Test Test Definition 1.0
+          name: capsule-install
+          description: Stage the U-Boot capsule test cabinet with fwupd
+        run:
+          steps:
+          - |
+            set -x
+            esrt=/sys/firmware/efi/esrt/entries/entry0
+            efivars=/sys/firmware/efi/efivars
+            grep -H . "${esrt}"/* || true
+            cat /sys/class/dmi/id/bios_version || true
+            if [ -r "${esrt}/fw_version" ]; then
+                cp -v "${esrt}/fw_version" /root/capsule-test-fw-version
+                lava-test-case esrt-present --result pass
+            else
+                lava-test-case esrt-present --result fail
+            fi
+            fwupdtool --version || true
+            fwupdtool get-devices </dev/null || true
+            fwupdtool get-details /root/u-boot-capsule-test.cab </dev/null || true
+            if fwupdtool install --force --allow-reinstall --allow-older \
+                   --no-reboot-check /root/u-boot-capsule-test.cab </dev/null; then
+                lava-test-case fwupdtool-install --result pass
+            else
+                lava-test-case fwupdtool-install --result fail
+            fi
+            ls -lR /boot/efi/EFI/UpdateCapsule || true
+            for var in OsIndications OsIndicationsSupported; do
+                od -An -tx1 "${efivars}/${var}-8be4df61-93ca-11d2-aa0d-00e098032b8c" || true
+            done
+            # with EFI_RT_VOLATILE_STORE, U-Boot only exposes the updated
+            # variables in VarToFile and the OS has to write them to the ESP
+            # (see doc/develop/uefi/uefi.rst); log whether fwupd did it
+            vartofile="${efivars}/VarToFile-b2ac5fc9-92b7-4acd-aeac-11e818c3130c"
+            ls -l "${vartofile}" /boot/efi/ubootefi.var || true
+            if [ -r "${vartofile}" ]; then
+                tail -c +5 "${vartofile}" >/tmp/ubootefi.var
+                if cmp /tmp/ubootefi.var /boot/efi/ubootefi.var; then
+                    echo "ubootefi.var already up to date"
+                else
+                    echo "ubootefi.var not up to date, copying VarToFile"
+                    cp -v /tmp/ubootefi.var /boot/efi/ubootefi.var
+                fi
+            fi
+            sync
+# power cycles the board; U-Boot should apply the capsule and reset itself
+- boot:
+    auto_login:
+      login_prompt: 'login:'
+      username: debian
+      password_prompt: 'Password'
+      password: "new password"
+      login_commands:
+      - sudo su
+    method: minimal
+    prompts:
+    - root@debian
+    - debian@debian
+    timeout:
+      minutes: 10
+- test:
+    timeout:
+      minutes: 5
+    definitions:
+    - from: inline
+      name: capsule-check
+      path: inline/capsule-check.yaml
+      repository:
+        metadata:
+          format: Lava-Test Test Definition 1.0
+          name: capsule-check
+          description: Check that U-Boot applied the capsule
+        run:
+          steps:
+          - |
+            set -x
+            esrt=/sys/firmware/efi/esrt/entries/entry0
+            grep -H . "${esrt}"/* || true
+            cat /sys/class/dmi/id/bios_version || true
+            ls -lR /boot/efi/EFI/UpdateCapsule || true
+            fwupdtool get-history </dev/null || true
+            before="$(cat /root/capsule-test-fw-version)"
+            after="$(cat "${esrt}/fw_version")"
+            echo "fw_version before: ${before} after: ${after}"
+            if [ "${after}" != "${before}" ]; then
+                lava-test-case fw-version-changed --result pass
+            else
+                lava-test-case fw-version-changed --result fail
+            fi
+            if [ "$(cat "${esrt}/last_attempt_status")" = 0 ]; then
+                lava-test-case last-attempt-status --result pass
+            else
+                lava-test-case last-attempt-status --result fail
+            fi
+            if [ "$(cat "${esrt}/last_attempt_version")" = "${after}" ]; then
+                lava-test-case last-attempt-version --result pass
+            else
+                lava-test-case last-attempt-version --result fail
+            fi
+context:
+  test_character_delay: 10
+device_type: qrb2210-rb1
+job_name: u-boot capsule test {{ARTIFACT_PREFIX}} {{BUILD_DOWNLOAD_URL}}
+priority: 50
+timeouts:
+  job:
+    minutes: 90
+visibility: public
