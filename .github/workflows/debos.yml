@@ -130,6 +130,11 @@ jobs:
               exit 1
           fi
           cp -av "$u_boot_rb1_img" .
+          # HACK: the capsule update test cabinet, if build-on-pr built one
+          u_boot_rb1_cab="/efs/${U_BOOT_RB1}/u-boot-capsule-test.cab"
+          if [ -f "$u_boot_rb1_cab" ]; then
+              cp -av "$u_boot_rb1_cab" .
+          fi
 
       # mtools is needed for the flash recipe
       # file, device-tree-compiler and u-boot-tools are needed by qcom-dtb-metadata
@@ -208,6 +213,19 @@ jobs:
               ${DEBOS_EXTRA_ARGS} \
               --print-recipe \
               debos-recipes/qualcomm-linux-debian-rootfs.yaml
+
+      # HACK: ship the capsule update test cabinet as /root/u-boot-capsule-test.cab
+      # for ci/u-boot-rb1-capsule; only the file is appended, so /root itself
+      # keeps the permissions from the rootfs recipe
+      - name: Add U-Boot capsule test cabinet to rootfs
+        run: |
+          set -ux
+          if [ -f u-boot-capsule-test.cab ]; then
+              mkdir -vp capsule-test-rootfs/root
+              cp -av u-boot-capsule-test.cab capsule-test-rootfs/root
+              tar -rvf rootfs.tar --owner=0 --group=0 --mode=0644 \
+                  -C capsule-test-rootfs ./root/u-boot-capsule-test.cab
+          fi
 
       - name: Build UFS and SD card images with debos
         run: |
