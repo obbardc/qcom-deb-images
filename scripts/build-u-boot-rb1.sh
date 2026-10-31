@@ -107,6 +107,8 @@ CAPSULE_GUID="400ffdcd-22e0-47e7-9a23-f16ed9382388"
 # fwupd compares against the cabinet version; derive it from the commit time
 # as YYYYMMDDHH (UTC) so that it increases with each qcom-next update
 fw_version="$(TZ=UTC git log -1 --date=format-local:%Y%m%d%H --format=%cd)"
+# HACK: let the capsule test build a newer version of the same tree
+fw_version="$((fw_version + ${FW_VERSION_OFFSET:-0}))"
 
 log_i "Creating EFI capsule (${CAPSULE_OUTPUT}, version ${fw_version})"
 ./tools/mkeficapsule \

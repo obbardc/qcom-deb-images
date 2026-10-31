@@ -67,12 +67,25 @@ jobs:
               xxd
           scripts/build-u-boot-rb1.sh
 
+      # HACK: build the same tree again with a newer firmware version and a
+      # different banner, for the capsule update test of ci/u-boot-rb1-capsule
+      - name: Build U-Boot capsule test cabinet for RB1
+        run: |
+          set -ux
+          mkdir -v capsule-test
+          cd capsule-test
+          LOCALVERSION=-capsule-test FW_VERSION_OFFSET=1 \
+              ../scripts/build-u-boot-rb1.sh
+
       - name: Upload results to EFS
         run: |
           set -ux
           export BUILD_DIR="/efs/${BUILD_ID}"
           mkdir -vp "${BUILD_DIR}"
           cp -av u-boot/rb1-boot.img "${BUILD_DIR}"
+          cp -av u-boot/u-boot.cab "${BUILD_DIR}"
+          cp -av capsule-test/u-boot/u-boot.cab \
+              "${BUILD_DIR}/u-boot-capsule-test.cab"
           sync
 
   build:
